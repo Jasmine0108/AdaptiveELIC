@@ -4,6 +4,7 @@ A simple test algorithm to rewrite the network
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from timm.models.layers import trunc_normal_
 from ELICUtilis.layers import (
@@ -30,6 +31,59 @@ def conv1x1(in_ch: int, out_ch: int, stride: int = 1) -> nn.Module:
     """1x1 convolution."""
     return nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride)
 
+# Feat: LoRA adapter
+class LoRAConv1x1(nn.Conv2d):
+    """Conv2d (1x1) with Low-Rank Adapters (LoRA) applied on the channel dimension.
+
+    Implements W' = W + B @ A where A \in R^{r x in_ch} (Gaussian initialized)
+    and B \in R^{out_ch x r} (initialized to zeros). The adapters are scaled by
+    `lora_alpha / r` during forward. The class inherits from `nn.Conv2d` so saved
+    weights/bias keep the same keys as a normal conv (compatibility with checkpoints).
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1, r: int = 10, lora_alpha: float = 1.0,
+                 bias: bool = True):
+        super().__init__(in_ch, out_ch, kernel_size=1, stride=stride, bias=bias)
+        self.r = int(r)
+        self.lora_alpha = float(lora_alpha)
+        self.scaling = self.lora_alpha / max(1, self.r)
+        if self.r > 0:
+            # A: r x in_ch, Gaussian init
+            # Setting std to 0.01
+            # self.A = nn.Parameter(torch.randn(self.r, in_ch) * 0.01)
+            # Standard Normal distrubition
+            self.A = nn.Parameter(torch.randn(self.r, in_ch))
+            # B: out_ch x r, zeros init so delta W = 0 initially
+            self.B = nn.Parameter(torch.zeros(out_ch, self.r))
+        else:
+            self.register_parameter('A', None)
+            self.register_parameter('B', None)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if getattr(self, 'r', 0) > 0 and (self.B is not None and self.A is not None):
+            # delta: (out_ch, in_ch)
+            delta_2d = (self.B @ self.A) * self.scaling
+            # reshape to conv weight shape (out_ch, in_ch, 1, 1)
+            delta = delta_2d.view(self.weight.size(0), self.weight.size(1), 1, 1)
+            return F.conv2d(x, self.weight + delta, bias=self.bias, stride=self.stride, padding=0)
+        return F.conv2d(x, self.weight, bias=self.bias, stride=self.stride, padding=0)
+    # Feat: LoRA merge function
+    def merge_adapter(self):
+        """Merge the learned low-rank adapter into the base conv weight.
+
+        After merging, adapter parameters are zeroed and `r` is set to 0 to
+        avoid double-counting if called again.
+        """
+        if getattr(self, 'r', 0) > 0 and (self.B is not None and self.A is not None):
+            with torch.no_grad():
+                delta_2d = (self.B @ self.A) * self.scaling
+                delta = delta_2d.view(self.weight.size(0), self.weight.size(1), 1, 1)
+                self.weight.data.add_(delta.data)
+                # zero adapters to keep determinism
+                self.B.data.zero_()
+                self.A.data.zero_()
+            self.r = 0
+
 class ResidualBottleneckBlock(nn.Module):
     """Simple residual block with two 3x3 convolutions.
 
@@ -37,22 +91,31 @@ class ResidualBottleneckBlock(nn.Module):
         in_ch (int): number of input channels
         out_ch (int): number of output channels
     """
-
+    # Modify: Add Convolution Adapter
     def __init__(self, in_ch: int):
         super().__init__()
         self.conv1 = conv1x1(in_ch, in_ch//2)
         self.relu = nn.ReLU(inplace=True)
+        # Convolution Adapter
+        self.conv_adapter1 = conv1x1(in_ch//2, in_ch//2)
         self.conv2 = conv3x3(in_ch//2, in_ch//2)
         self.relu2 = nn.ReLU(inplace=True)
+        # Convolution Adapter
+        self.conv_adapter2 = conv1x1(in_ch//2, in_ch//2)
         self.conv3 = conv1x1(in_ch//2, in_ch)
-
+    
+    # Modify: Add Convolution Adapter
     def forward(self, x: Tensor) -> Tensor:
         identity = x
 
         out = self.conv1(x)
         out = self.relu(out)
+        # Convolution Adapter
+        out = self.conv_adapter1(out)
         out = self.conv2(out)
         out = self.relu2(out)
+        # Convolution Adapter
+        out = self.conv_adapter2(out)
         out = self.conv3(out)
 
         out = out + identity
@@ -153,15 +216,22 @@ class TestModel(CompressionModel):
             self.groups[i+1], 2*self.groups[i+1], kernel_size=5, padding=2, stride=1
             ) for i in range(num_slices)
         )## from https://github.com/JiangWeibeta/Checkerboard-Context-Model-for-Efficient-Learned-Image-Compression/blob/main/version2/layers/CheckerboardContext.py
-
+        # Modify: Add LoRA to ParamAggregation
         self.ParamAggregation = nn.ModuleList(
             nn.Sequential(
-                conv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[
-                        i + 1] * 2, 640),
+                # original Conv1x1 layer
+                # conv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[
+                # i + 1] * 2, 640),
+                LoRAConv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[
+                i + 1] * 2, 640, r=10, lora_alpha=1.0),
                 nn.ReLU(inplace=True),
-                conv1x1(640, 512),
+                # original Conv1x1 layer
+                # conv1x1(640, 512),
+                LoRAConv1x1(640, 512, r=10, lora_alpha=1.0),
                 nn.ReLU(inplace=True),
-                conv1x1(512, self.groups[i + 1]*2),
+                # original Conv1x1 layer
+                # conv1x1(512, self.groups[i + 1]*2),
+                LoRAConv1x1(512, self.groups[i + 1]*2, r=10, lora_alpha=1.0),
             ) for i in range(num_slices)
         ) ##from checkboard "Checkerboard Context Model for Efficient Learned Image Compression"" gep网络参数
 
@@ -325,6 +395,16 @@ class TestModel(CompressionModel):
         updated = self.gaussian_conditional.update_scale_table(scale_table, force=force)
         updated |= super().update(force=force)
         return updated
+    # Feat: LoRA merge function
+    def merge_lora(self):
+        """Merge all LoRA adapters (1x1) into their base convolution weights.
+
+        Call this after training adapters if you want to fold the low-rank
+        updates into the original weights and remove adapter state.
+        """
+        for m in self.modules():
+            if isinstance(m, LoRAConv1x1):
+                m.merge_adapter()
 
     @classmethod
     def from_state_dict(cls, state_dict):
