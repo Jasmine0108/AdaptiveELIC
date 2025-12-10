@@ -131,12 +131,14 @@ class Quantizer():
             return torch.round(inputs)
 
 class TestModel(CompressionModel):
-
-    def __init__(self, N=192, M=320, num_slices=5, **kwargs):
+    def __init__(self, N=192, M=320, num_slices=5, flag_inference: bool = False, **kwargs):
         super().__init__(entropy_bottleneck_channels=192)
         self.N = int(N)
         self.M = int(M)
         self.num_slices = num_slices
+        # Whether to construct ParamAggregation using plain convs (inference)
+        # or LoRA-enabled convs (training/testing).
+        self.flag_inference = bool(flag_inference)
 
         """
              N: channel number of main network
@@ -218,15 +220,22 @@ class TestModel(CompressionModel):
                 # original Conv1x1 layer
                 # conv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[
                 # i + 1] * 2, 640),
-                LoRAConv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[
+                conv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[i + 1] * 2, 640) 
+                if self.flag_inference 
+                else LoRAConv1x1(640 + self.groups[i+1 if i > 0 else 0] * 2 + self.groups[
                 i + 1] * 2, 640, r=10, lora_alpha=1.0),
+   
                 nn.ReLU(inplace=True),
+                
                 # original Conv1x1 layer
                 # conv1x1(640, 512),
+                conv1x1(640, 512) if self.flag_inference else
                 LoRAConv1x1(640, 512, r=10, lora_alpha=1.0),
+
                 nn.ReLU(inplace=True),
                 # original Conv1x1 layer
                 # conv1x1(512, self.groups[i + 1]*2),
+                conv1x1(512, self.groups[i + 1]*2) if self.flag_inference else
                 LoRAConv1x1(512, self.groups[i + 1]*2, r=10, lora_alpha=1.0),
             ) for i in range(num_slices)
         ) ##from checkboard "Checkerboard Context Model for Efficient Learned Image Compression"" gep网络参数
@@ -391,16 +400,6 @@ class TestModel(CompressionModel):
         updated = self.gaussian_conditional.update_scale_table(scale_table, force=force)
         updated |= super().update(force=force)
         return updated
-    # Feat: LoRA merge function
-    def merge_lora(self):
-        """Merge all LoRA adapters (1x1) into their base convolution weights.
-
-        Call this after training adapters if you want to fold the low-rank
-        updates into the original weights and remove adapter state.
-        """
-        for m in self.modules():
-            if isinstance(m, LoRAConv1x1):
-                m.merge_adapter()
 
     @classmethod
     def from_state_dict(cls, state_dict):
@@ -710,7 +709,60 @@ class TestModel(CompressionModel):
             "time": {'y_enc': y_enc, "y_dec": y_dec, "z_enc": z_enc, "z_dec": z_dec, "params":params_time}
         }
 
+     # Feat: LoRA merge function
+    
+    def merge_lora(self):
+        """Merge all LoRA adapters (1x1) into their base convolution weights.
 
+        Call this after training adapters if you want to fold the low-rank
+        updates into the original weights and remove adapter state.
+        """
+        for m in self.modules():
+            if isinstance(m, LoRAConv1x1):
+                m.merge_adapter()
+    
+    def set_trainable_adapters(self, stage: int = 1) -> list[str]:
+        '''
+        Returns a list of parameter names that remain trainable 
+        in stage 1 or stage 2
+        '''
+        # Freeze everything first
+        for p in self.parameters():
+            p.requires_grad = False
+        if stage == 1:
+            # Unfreeze LoRA parameters (A and B) and their bias when appropriate
+            for m in self.modules():
+                if isinstance(m, LoRAConv1x1):
+                    if getattr(m, 'A', None) is not None:
+                        m.A.requires_grad = True
+                    if getattr(m, 'B', None) is not None:
+                        m.B.requires_grad = True
+                    if getattr(m, 'bias', None) is not None and m.bias is not None:
+                        m.bias.requires_grad = True
+            # Any module whose named path contains 'adapter' and is a Conv2d will be unfrozen
+            for name, m in self.named_modules():
+                if 'adapter' in name and isinstance(m, nn.Conv2d):
+                    for p in m.parameters():
+                        p.requires_grad = True
+        elif stage == 2:
+            # Unfreeze only the last 3 ResidualBottleneckBlock modules inside the decoder self.g_s
+            num_to_unfreeze = 3
+            # collect indices of ResidualBottleneckBlock modules inside self.g_s
+            res_indices = [i for i, m in enumerate(self.g_s) if isinstance(m, ResidualBottleneckBlock)]
+            if len(res_indices) == 0:
+                # nothing to unfreeze
+                pass
+            else:
+                last_indices = res_indices[-num_to_unfreeze:]
+                for idx in last_indices:
+                    block = self.g_s[idx]
+                    for p in block.parameters():
+                        p.requires_grad = True
+        else:
+            raise ValueError("stage must be 1 or 2")
+        # Return names of parameters that are trainable for convenience
+        trainable_params = [name for name, p in self.named_parameters() if p.requires_grad]
+        return trainable_params
 
 
 
@@ -720,7 +772,7 @@ if __name__ == "__main__":
     #                         dim_head=64, mlp_dim=64, dropout=0.1,
     #                         emb_dropout=0.)
 
-    model = TestModel(N=192, M=320, num_slices=5)
+    model = TestModel(N=192, M=320, num_slices=5, flag_inference=False)
     # model = JointAutoregressiveHierarchicalPriors(192, 192)
     # model = Cheng2020Attention(128)
     input = torch.Tensor(1, 3, 256, 256)
