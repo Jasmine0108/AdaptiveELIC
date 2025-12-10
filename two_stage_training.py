@@ -40,41 +40,96 @@ from Network import TestModel
 
 class ImageFolder(Dataset):
     # 1. 增加 mode 參數和 split_ratio 參數 (預設 80% 訓練集)
-    def __init__(self, root, transform=None, mode='train', split_ratio=0.8):
+    #    支援從 JSON 檔讀取檔名：--split-json
+    def __init__(self, root, transform=None, mode='train', split_ratio=0.8, filelist_json=None):
         self.root = root
         self.transform = transform
-        self.mode = mode.lower() # 轉小寫確保判斷正確
+        self.mode = mode.lower()  # 轉小寫確保判斷正確
         self.split_ratio = split_ratio
-        
+
         # 定義支援的圖片格式
         valid_extensions = ('.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', '.webp')
-        
+
         if not os.path.exists(root):
             raise FileNotFoundError(f"Root directory not found: {root}")
-            
-        # 讀取該資料夾下所有符合格式的檔案
-        all_samples = [
-            os.path.join(root, f) for f in os.listdir(root) 
-            if f.lower().endswith(valid_extensions)
-        ]
-        
+
+        # 如果提供了 JSON 檔，優先從 JSON 讀取檔名
+        all_samples = []
+        if filelist_json is not None:
+            try:
+                import json
+
+                with open(filelist_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                filenames = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, str):
+                            filenames.append(item)
+                        elif isinstance(item, dict) and 'filename' in item:
+                            filenames.append(item['filename'])
+                elif isinstance(data, dict):
+                    # common keys that may hold lists of filenames
+                    for key in ('filenames', 'files', 'images', 'training', 'train'):
+                        if key in data and isinstance(data[key], list):
+                            for item in data[key]:
+                                if isinstance(item, str):
+                                    filenames.append(item)
+                                elif isinstance(item, dict) and 'filename' in item:
+                                    filenames.append(item['filename'])
+                            break
+                    # fallback: collect any list-of-dicts with 'filename' fields
+                    if len(filenames) == 0:
+                        for v in data.values():
+                            if isinstance(v, list):
+                                for item in v:
+                                    if isinstance(item, dict) and 'filename' in item:
+                                        filenames.append(item['filename'])
+                                if len(filenames) > 0:
+                                    break
+
+                # normalize and join with root if needed
+                for fn in filenames:
+                    if os.path.isabs(fn):
+                        candidate = fn
+                    else:
+                        candidate = os.path.join(root, fn)
+                    if os.path.exists(candidate) and candidate.lower().endswith(valid_extensions):
+                        all_samples.append(candidate)
+                    else:
+                        # try basename only search in root
+                        base = os.path.basename(fn)
+                        alt = os.path.join(root, base)
+                        if os.path.exists(alt) and alt.lower().endswith(valid_extensions):
+                            all_samples.append(alt)
+                        else:
+                            # skip missing files silently but print a warning
+                            print(f"Warning: listed file not found or unsupported: {fn}")
+            except Exception as e:
+                print(f"Failed to load filelist JSON '{filelist_json}': {e}")
+
+        # 若 JSON 沒提供或回傳為空，就走預設的資料夾掃描
+        if len(all_samples) == 0:
+            all_samples = [
+                os.path.join(root, f) for f in os.listdir(root)
+                if f.lower().endswith(valid_extensions)
+            ]
+
         # 排序確保 train/test 劃分在不同運行中保持一致
         all_samples.sort()
 
         if len(all_samples) == 0:
             raise RuntimeError(f"Found 0 files in {root}. Supported extensions are: {valid_extensions}")
 
-        # 2. 執行 train/test 劃分邏輯
+        # 執行 train/test 劃分邏輯
         total_count = len(all_samples)
-        # 計算訓練集的數量 (取整數)
-        train_count = math.floor(total_count * self.split_ratio) 
-        
+        train_count = math.floor(total_count * self.split_ratio)
+
         if self.mode == 'train':
-            # 訓練集：從開始到 train_count
             self.samples = all_samples[:train_count]
             print(f"Dataset initialized in TRAIN mode. Using {len(self.samples)} files.")
         elif self.mode == 'test':
-            # 測試集：從 train_count 到結束
             self.samples = all_samples[train_count:]
             print(f"Dataset initialized in TEST mode. Using {len(self.samples)} files.")
         else:
@@ -360,8 +415,10 @@ def two_stage_training(args):
         [transforms.CenterCrop(args.patch_size), transforms.ToTensor()]
     )
 
-    train_dataset = ImageFolder(args.dataset, transform=train_transforms, mode = "train")
-    test_dataset = ImageFolder(args.dataset, transform=test_transforms, mode = "test")
+    train_dataset = ImageFolder(args.dataset, transform=train_transforms, mode="train",
+                                split_ratio=args.split_ratio, filelist_json=args.split_json)
+    test_dataset = ImageFolder(args.dataset, transform=test_transforms, mode="test",
+                               split_ratio=args.split_ratio, filelist_json=args.split_json)
 
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
 
@@ -672,6 +729,10 @@ def parse_args(argv):
     parser.add_argument('--savepath', default='./checkpoint', type=str, help='Path to save the checkpoint')
     parser.add_argument("--checkpoint", type=str, help="Path to a checkpoint")
     parser.add_argument("--stage", type=int, required=True, help="Training stage")
+    parser.add_argument("--split-json", dest="split_json", type=str, default=None,
+                        help="Path to a JSON file listing dataset filenames (overrides folder scan)")
+    parser.add_argument("--split-ratio", dest="split_ratio", type=float, default=0.8,
+                        help="Train split ratio when splitting dataset (default: 0.8 => 4:1)")
     args = parser.parse_args(argv)
     return args
     
