@@ -103,7 +103,7 @@ def conv1x1(in_ch: int, out_ch: int, stride: int = 1) -> nn.Module:
     """1x1 convolution."""
     return nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride)
 
-
+# no use in model
 class ResidualBlockWithStride(nn.Module):
     """Residual block with a stride on the first convolution.
 
@@ -137,7 +137,7 @@ class ResidualBlockWithStride(nn.Module):
         out += identity
         return out
 
-
+# no use in model
 class ResidualBlockUpsample(nn.Module):
     """Residual block with sub-pixel upsampling on the last convolution.
 
@@ -165,7 +165,7 @@ class ResidualBlockUpsample(nn.Module):
         out += identity
         return out
 
-
+# no use in model
 class ResidualBlock(nn.Module):
     """Simple residual block with two 3x3 convolutions.
 
@@ -198,7 +198,7 @@ class ResidualBlock(nn.Module):
         out = out + identity
         return out
 
-
+# Modify: Add Convolution Adapter
 class AttentionBlock(nn.Module):
     """Self attention block.
 
@@ -227,6 +227,7 @@ class AttentionBlock(nn.Module):
                     conv1x1(N // 2, N),
                 )
                 self.relu = nn.ReLU(inplace=True)
+                
 
             def forward(self, x: Tensor) -> Tensor:
                 identity = x
@@ -243,6 +244,8 @@ class AttentionBlock(nn.Module):
             ResidualUnit(),
             conv1x1(N, N),
         )
+        # Convolution Adapter
+        self.conv_adapter = conv1x1(N, N)
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
@@ -250,4 +253,6 @@ class AttentionBlock(nn.Module):
         b = self.conv_b(x)
         out = a * torch.sigmoid(b)
         out += identity
+        # Convolution Adapter
+        out = self.conv_adapter(out)
         return out
