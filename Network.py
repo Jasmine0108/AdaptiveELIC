@@ -96,13 +96,11 @@ class ResidualBottleneckBlock(nn.Module):
         super().__init__()
         self.conv1 = conv1x1(in_ch, in_ch//2)
         self.relu = nn.ReLU(inplace=True)
-        # Convolution Adapter
-        self.conv_adapter1 = conv1x1(in_ch//2, in_ch//2)
         self.conv2 = conv3x3(in_ch//2, in_ch//2)
         self.relu2 = nn.ReLU(inplace=True)
-        # Convolution Adapter
-        self.conv_adapter2 = conv1x1(in_ch//2, in_ch//2)
         self.conv3 = conv1x1(in_ch//2, in_ch)
+        # Convolution Adapter
+        self.conv_adapter2 = conv1x1(in_ch, in_ch)
     
     # Modify: Add Convolution Adapter
     def forward(self, x: Tensor) -> Tensor:
@@ -110,15 +108,13 @@ class ResidualBottleneckBlock(nn.Module):
 
         out = self.conv1(x)
         out = self.relu(out)
-        # Convolution Adapter
-        out = self.conv_adapter1(out)
         out = self.conv2(out)
         out = self.relu2(out)
-        # Convolution Adapter
-        out = self.conv_adapter2(out)
         out = self.conv3(out)
 
         out = out + identity
+        # Convolution Adapter
+        out = self.conv_adapter(out)
         return out
 
 
