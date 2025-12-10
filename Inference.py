@@ -262,23 +262,87 @@ def setup_args():
         default=256,
         help="padding patch size (default: %(default)s)",
     )
+    parser.add_argument(
+        "--inference-json",
+        dest="inference_json",
+        type=str,
+        default=None,
+        help="Path to a JSON file listing filenames to use for inference (overrides directory scan)",
+    )
     return parser
 
 
 def main(argv):
     parser = setup_args()
     args = parser.parse_args(argv)
+# ===================================== added
+    # If an inference JSON is provided, try to load filenames from it (supports several common layouts)
+    filepaths = []
+    if getattr(args, 'inference_json', None):
+        try:
+            with open(args.inference_json, 'r', encoding='utf-8') as f:
+                data = json.load(f)
 
-    filepaths = collect_images(args.dataset)
-    filepaths = sorted(filepaths)
+            filenames = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, str):
+                        filenames.append(item)
+                    elif isinstance(item, dict) and 'filename' in item:
+                        filenames.append(item['filename'])
+            elif isinstance(data, dict):
+                # common keys that may hold lists of filenames
+                for key in ('filenames', 'files', 'images', 'training', 'train'):
+                    if key in data and isinstance(data[key], list):
+                        for item in data[key]:
+                            if isinstance(item, str):
+                                filenames.append(item)
+                            elif isinstance(item, dict) and 'filename' in item:
+                                filenames.append(item['filename'])
+                        break
+                # fallback: collect any list-of-dicts with 'filename' fields
+                if len(filenames) == 0:
+                    for v in data.values():
+                        if isinstance(v, list):
+                            for item in v:
+                                if isinstance(item, dict) and 'filename' in item:
+                                    filenames.append(item['filename'])
+                            if len(filenames) > 0:
+                                break
+
+            # normalize and join with dataset root if needed
+            for fn in filenames:
+                if os.path.isabs(fn):
+                    candidate = fn
+                else:
+                    candidate = os.path.join(args.dataset, fn)
+                if os.path.exists(candidate):
+                    filepaths.append(candidate)
+                else:
+                    # try basename only search in dataset
+                    alt = os.path.join(args.dataset, os.path.basename(fn))
+                    if os.path.exists(alt):
+                        filepaths.append(alt)
+                    else:
+                        print(f"Warning: listed file not found: {fn}")
+
+            filepaths = sorted(filepaths)
+        except Exception as e:
+            print(f"Failed to load inference JSON '{args.inference_json}': {e}")
+            filepaths = collect_images(args.dataset)
+            filepaths = sorted(filepaths)
+    else:
+        filepaths = collect_images(args.dataset)
+        filepaths = sorted(filepaths)
+
     if len(filepaths) == 0:
-        print("Error: no images found in directory.", file=sys.stderr)
+        print("Error: no images found for inference.", file=sys.stderr)
         sys.exit(1)
-
+# =====================================
     compressai.set_entropy_coder(args.entropy_coder)
 
     state_dict = load_state_dict(torch.load(args.paths))
-    model_cls = TestModel()
+    model_cls = TestModel(flag_inference=True)
     model = model_cls.from_state_dict(state_dict).eval()
 
     results = defaultdict(list)
