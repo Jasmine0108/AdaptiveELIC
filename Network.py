@@ -100,7 +100,7 @@ class ResidualBottleneckBlock(nn.Module):
         self.relu2 = nn.ReLU(inplace=True)
         self.conv3 = conv1x1(in_ch//2, in_ch)
         # Convolution Adapter
-        self.conv_adapter2 = conv1x1(in_ch, in_ch)
+        self.conv_adapter = conv1x1(in_ch, in_ch)
     
     # Modify: Add Convolution Adapter
     def forward(self, x: Tensor) -> Tensor:
