@@ -329,7 +329,7 @@ def train_one_epoch(
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
         optimizer.step()
 
-        if i % 8 == 0:
+        if i % 2 == 0:
             print(
                 f"Train epoch {epoch}: ["
                 f"{i*len(d)}/{len(train_dataloader.dataset)}"
@@ -352,7 +352,7 @@ def train_one_epoch(
 
     return train_loss.avg, train_bpp_loss.avg, train_mse_loss.avg
 
-def test_epoch(epoch, test_dataloader, model, criterion):
+def test_epoch(epoch, test_dataloader, model, criterion, noisequant):
     model.eval()
     device = next(model.parameters()).device
 
@@ -365,7 +365,7 @@ def test_epoch(epoch, test_dataloader, model, criterion):
     with torch.no_grad():
         for d in test_dataloader:
             d = d.to(device)
-            out_net = model(d)
+            out_net = model(d, noisequant)
             out_criterion = criterion(out_net, d)
 
             bpp_loss.update(out_criterion["bpp_loss"].item())
@@ -373,6 +373,7 @@ def test_epoch(epoch, test_dataloader, model, criterion):
             z_bpp_loss.update(out_criterion["z_bpp_loss"].item())
             loss.update(out_criterion["loss"].item())
             mse_loss.update(out_criterion["mse_loss"].item())
+
 
     print(
         f"Test epoch {epoch}: Average losses:"
@@ -536,7 +537,7 @@ def two_stage_training(args):
             writer.add_scalar('Train/mse', train_mse, epoch)
             writer.add_scalar('Train/bpp', train_bpp, epoch)
 
-            loss, bpp, mse = test_epoch(epoch, test_dataloader, net, criterion)
+            loss, bpp, mse = test_epoch(epoch, test_dataloader, net, criterion, noisequant)
             writer.add_scalar('Test/loss', loss, epoch)
             writer.add_scalar('Test/mse', mse, epoch)
             writer.add_scalar('Test/bpp', bpp, epoch)
@@ -609,7 +610,7 @@ def two_stage_training(args):
             writer.add_scalar('Train/mse', train_mse, epoch)
             writer.add_scalar('Train/bpp', train_bpp, epoch)
 
-            loss, bpp, mse = test_epoch(epoch, test_dataloader, net, criterion)
+            loss, bpp, mse = test_epoch(epoch, test_dataloader, net, criterion, noisequant)
             writer.add_scalar('Test/loss', loss, epoch)
             writer.add_scalar('Test/mse', mse, epoch)
             writer.add_scalar('Test/bpp', bpp, epoch)
