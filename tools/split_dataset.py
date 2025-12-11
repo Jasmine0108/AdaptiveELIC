@@ -2,7 +2,7 @@ import os
 import random
 import json
 
-image_folder = "../dataset/Craters"
+image_folder = "../dataset/Screen-Content"
 
 image_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
 
@@ -15,10 +15,10 @@ train_images = random.sample(all_images, 25)
 
 test_images = [f for f in all_images if f not in train_images]
 
-with open("../splits/Craters/train.json", "w") as f:
+with open("../splits/Screen-Content/train.json", "w") as f:
     json.dump(train_images, f, indent=4)
 
-with open("../splits/Craters/inference.json", "w") as f:
+with open("../splits/Screen-Content/inference.json", "w") as f:
     json.dump(test_images, f, indent=4)
 
 print(f"total: {len(all_images)}")
