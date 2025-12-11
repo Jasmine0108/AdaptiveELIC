@@ -101,6 +101,10 @@ class ResidualBottleneckBlock(nn.Module):
         self.conv3 = conv1x1(in_ch//2, in_ch)
         # Convolution Adapter
         self.conv_adapter = conv1x1(in_ch, in_ch)
+
+        nn.init.zeros_(self.conv_adapter.weight)
+        if self.conv_adapter.bias is not None:
+            nn.init.zeros_(self.conv_adapter.bias)
     
     # Modify: Add Convolution Adapter
     def forward(self, x: Tensor) -> Tensor:
@@ -114,7 +118,8 @@ class ResidualBottleneckBlock(nn.Module):
 
         out = out + identity
         # Convolution Adapter
-        out = self.conv_adapter(out)
+        adapter_feat = self.conv_adapter(out)
+        out = out + adapter_feat
         return out
 
 
