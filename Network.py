@@ -50,9 +50,9 @@ class LoRAConv1x1(nn.Conv2d):
         if self.r > 0:
             # A: r x in_ch, Gaussian init
             # Setting std to 0.01
-            # self.A = nn.Parameter(torch.randn(self.r, in_ch) * 0.01)
+            self.A = nn.Parameter(torch.randn(self.r, in_ch) * 0.01)
             # Standard Normal distrubition
-            self.A = nn.Parameter(torch.randn(self.r, in_ch))
+            # self.A = nn.Parameter(torch.randn(self.r, in_ch))
             # B: out_ch x r, zeros init so delta W = 0 initially
             self.B = nn.Parameter(torch.zeros(out_ch, self.r))
         else:
