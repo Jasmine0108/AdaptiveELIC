@@ -1,4 +1,3 @@
-
 """
 Evaluate an end-to-end compression model on an image dataset.
 """
@@ -59,9 +58,8 @@ def read_image(filepath: str) -> torch.Tensor:
 def inference(model, x, f, outputpath, patch):
     x = x.unsqueeze(0)
     imgpath = f.split('/')
-    imgpath[-2] = outputpath
-    imgPath = '/'.join(imgpath)
-    csvfile = '/'.join(imgpath[:-1]) + '/result.csv'
+    imgPath = outputpath + '/rec/' + imgpath[-1]
+    csvfile = outputpath + '/result.csv'
     print('decoding img: {}'.format(f))
 ########original padding
     h, w = x.size(2), x.size(3)
@@ -106,8 +104,12 @@ def inference(model, x, f, outputpath, patch):
     z_bpp = len(out_enc["strings"][1][0])* 8.0 / num_pixels
     y_bpp = bpp - z_bpp
 
+    # Ensure output directory exists before saving reconstructed image
+    os.makedirs(os.path.dirname(imgPath), exist_ok=True)
     torchvision.utils.save_image(out_dec["x_hat"], imgPath, nrow=1)
     PSNR = psnr(x, out_dec["x_hat"])
+    # Ensure CSV directory exists (safety if called outside eval pipeline)
+    os.makedirs(os.path.dirname(csvfile), exist_ok=True)
     with open(csvfile, 'a+') as f:
         row = [imgpath[-1], bpp * num_pixels, num_pixels, bpp, y_bpp, z_bpp,
                torch.nn.functional.mse_loss(x, out_dec["x_hat"]).item() * 255 ** 2, psnr(x, out_dec["x_hat"]),
@@ -128,9 +130,8 @@ def inference(model, x, f, outputpath, patch):
 def inference_entropy_estimation(model, x, f, outputpath, patch):
     x = x.unsqueeze(0)
     imgpath = f.split('/')
-    imgpath[-2] = outputpath
-    imgPath = '/'.join(imgpath)
-    csvfile = '/'.join(imgpath[:-1]) + '/result.csv'
+    imgPath = outputpath + '/rec/' + imgpath[-1]
+    csvfile = outputpath + '/result.csv'
     print('decoding img: {}'.format(f))
     ########original padding
     h, w = x.size(2), x.size(3)
@@ -166,8 +167,12 @@ def inference_entropy_estimation(model, x, f, outputpath, patch):
     y_bpp = (torch.log(out_net["likelihoods"]["y"]).sum() / (-math.log(2) * num_pixels))
     z_bpp = (torch.log(out_net["likelihoods"]["y"]).sum() / (-math.log(2) * num_pixels))
 
+    # Ensure output directory exists before saving reconstructed image
+    os.makedirs(os.path.dirname(imgPath), exist_ok=True)
     torchvision.utils.save_image(out_net["x_hat"], imgPath, nrow=1)
     PSNR = psnr(x, out_net["x_hat"])
+    # Ensure CSV directory exists (safety if called outside eval pipeline)
+    os.makedirs(os.path.dirname(csvfile), exist_ok=True)
     with open(csvfile, 'a+') as f:
         row = [imgpath[-1], bpp.item() * num_pixels, num_pixels, bpp.item(), y_bpp.item(), z_bpp.item(),
                torch.nn.functional.mse_loss(x, out_net["x_hat"]).item() * 255 ** 2, PSNR,
@@ -187,9 +192,7 @@ def inference_entropy_estimation(model, x, f, outputpath, patch):
 def eval_model(model, filepaths, entropy_estimation=False, half=False, outputpath='Recon', patch=576):
     device = next(model.parameters()).device
     metrics = defaultdict(float)
-    imgdir = filepaths[0].split('/')
-    imgdir[-2] = outputpath
-    imgDir = '/'.join(imgdir[:-1])
+    imgDir = outputpath
     if not os.path.isdir(imgDir):
         os.makedirs(imgDir)
     csvfile = imgDir + '/result.csv'
@@ -341,7 +344,29 @@ def main(argv):
 # =====================================
     compressai.set_entropy_coder(args.entropy_coder)
 
-    state_dict = load_state_dict(torch.load(args.paths))
+    # Load checkpoint and normalize its state_dict to avoid KeyError when
+    # updating registered buffers (e.g. gaussian_conditional._quantized_cdf).
+    # Support common forms: plain state_dict, dict containing 'state_dict',
+    # and keys with 'module.' prefix.
+    raw_ckpt = torch.load(args.paths, map_location="cpu")
+    if isinstance(raw_ckpt, dict) and "state_dict" in raw_ckpt:
+        sd = raw_ckpt["state_dict"]
+    else:
+        sd = raw_ckpt
+
+    # If load_state_dict helper returned an object (from compressai.zoo),
+    # use it directly; otherwise ensure we have a mapping of param names -> tensors.
+    if hasattr(sd, "items"):
+        normalized = {}
+        for k, v in sd.items():
+            nk = k
+            if nk.startswith("module."):
+                nk = nk[len("module.") :]
+            normalized[nk] = v
+        state_dict = normalized
+    else:
+        state_dict = sd
+
     model_cls = TestModel(flag_inference=True)
     model = model_cls.from_state_dict(state_dict).eval()
 
@@ -349,6 +374,17 @@ def main(argv):
 
     if args.cuda and torch.cuda.is_available():
         model = model.to("cuda")
+
+    # Ensure entropy models' internal CDFs / buffers are initialized.
+    # CompressAI may require calling `update()` after loading a checkpoint
+    # to initialize quantized CDFs. If these are uninitialized you'll see
+    # "Uninitialized CDFs. Run update() first" errors during compress().
+    try:
+        # model.update returns True if any buffers were updated
+        updated = model.update()
+        print(f"model.update() -> {updated}")
+    except Exception as e:
+        print("Warning: model.update() failed:", e)
 
     metrics = eval_model(model, filepaths, args.entropy_estimation, args.half, args.output_path, args.patch)
     for k, v in metrics.items():
@@ -365,3 +401,6 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+
+
+
